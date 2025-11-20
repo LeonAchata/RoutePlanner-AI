@@ -1,0 +1,25 @@
+# FastAPI y servidor
+fastapi
+uvicorn[standard]
+
+# Pydantic v2
+pydantic
+pydantic-settings
+
+# LangGraph y LangChain
+langgraph
+langchain
+langchain-openai
+langchain-core
+
+# OpenAI
+openai
+
+# Google Maps
+googlemaps
+
+# Optimización (OR-Tools para TSP)
+ortools
+
+# Utilidades
+python-dotenv

@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Agente de Rutas Inteligente - LangGraph</title>
+    <meta name="description" content="Calcula rutas óptimas usando IA y Google Maps">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🗺️ Agente de Rutas Inteligente</h1>
+            <p class="subtitle">Describe tu ruta en lenguaje natural y te daremos la mejor secuencia</p>
+        </header>
+        
+        <!-- Input Form -->
+        <div class="card">
+            <form id="routeForm">
+                <div class="input-section">
+                    <label for="routeInput">Describe tu ruta o entregas:</label>
+                    <textarea 
+                        id="routeInput" 
+                        placeholder="Ejemplo: Hoy voy a hacer 3 entregas, una en calle Los Olivos 123, Barranco, otra en jiron Sucre 456, Magdalena y otra en Av. Larco 789, Miraflores"
+                        required
+                    ></textarea>
+                </div>
+                
+                <!-- Examples -->
+                <div class="examples">
+                    <h4>Ejemplos:</h4>
+                    <ul id="examplesList"></ul>
+                </div>
+                
+                <button type="submit" id="submitBtn" class="btn-primary">
+                    🗺️ Calcular Ruta Óptima
+                </button>
+            </form>
+        </div>
+        
+        <!-- Loading State -->
+        <div id="loadingContainer" class="card loading-container hidden">
+            <div class="spinner"></div>
+            <p>Calculando ruta óptima con IA...</p>
+        </div>
+        
+        <!-- Error Alert -->
+        <div id="errorContainer" class="alert alert-error hidden">
+            <span class="alert-icon">⚠️</span>
+            <div>
+                <strong>Error:</strong> <span id="errorMessage"></span>
+            </div>
+        </div>
+        
+        <!-- Results -->
+        <div id="resultsContainer" class="card hidden">
+            <div class="results-header">
+                <h2>✅ Ruta Calculada</h2>
+                <div style="color: #64748b; font-size: 0.9rem;">
+                    Origen: <strong id="origin"></strong>
+                </div>
+            </div>
+            
+            <!-- Stats -->
+            <div class="stats">
+                <div class="stat-card">
+                    <div class="stat-label">Distancia Total</div>
+                    <div class="stat-value"><span id="totalDistance"></span> km</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Tiempo Estimado</div>
+                    <div class="stat-value"><span id="totalTime"></span></div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">Destinos</div>
+                    <div class="stat-value"><span id="destinationsCount"></span></div>
+                </div>
+            </div>
+            
+            <!-- Route Order -->
+            <div class="route-path">
+                <h3>🛣️ Orden de Visita</h3>
+                <div class="location-list" id="locationList"></div>
+            </div>
+            
+            <!-- Detailed Steps -->
+            <div class="route-steps">
+                <h3>📍 Pasos Detallados</h3>
+                <div id="stepsList"></div>
+            </div>
+
+            <!-- Google Maps Button -->
+            <div id="gmapsLink" style="margin-top: 1.5em;"></div>
+        </div>
+    </div>
+    
+    <script src="app.js"></script>
+</body>
+</html>
