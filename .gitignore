@@ -1,3 +1,18 @@
+# Environment
 .env
+.venv/
+venv/
+
+# Python
 __pycache__/
-test_api.py
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

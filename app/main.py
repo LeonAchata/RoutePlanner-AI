@@ -1,105 +1,101 @@
+import logging
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from app.config import get_settings
-from app.graph.workflow import run_workflow
-from app.models.state import GraphState
-from app.models.schemas import RouteRequest, RouteResponse, RouteStepResponse
-from app.utils.helpers import format_distance, format_duration
+from fastapi.staticfiles import StaticFiles
 
+from app import __version__
+from app.config import get_settings
+from app.formatting import format_distance, format_duration
+from app.graph.workflow import run_workflow
+from app.models.schemas import (
+    ErrorResponse,
+    RouteRequest,
+    RouteResponse,
+    RouteStepResponse,
+    StopResponse,
+)
 
 settings = get_settings()
 
-app = FastAPI(title=settings.app_name, debug=settings.debug)
+logging.basicConfig(
+    level=logging.DEBUG if settings.debug else logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
 
-# CORS (abierto por defecto; ajustar para producción)
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend"
+
+app = FastAPI(
+    title=settings.app_name,
+    version=__version__,
+    description="Plan the fastest order to visit several places from a plain-language description.",
+    debug=settings.debug,
+)
+
 app.add_middleware(
-	CORSMiddleware,
-    allow_origins=["*"],
+    CORSMiddleware,
+    allow_origins=settings.cors_origin_list,
     allow_credentials=False,
-	allow_methods=["*"],
-	allow_headers=["*"],
+    allow_methods=["GET", "POST"],
+    allow_headers=["Content-Type"],
 )
 
 
-@app.get("/health")
+@app.get("/health", tags=["meta"])
 def health():
-    """
-    Health check endpoint para Railway/Docker/monitoreo
-    """
+    missing = settings.missing_keys()
     return {
-        "status": "ok",
-        "service": settings.app_name,
-        "version": "1.0.0",
+        "status": "ok" if not missing else "degraded",
+        "version": __version__,
+        "missing_config": missing,
     }
-@app.post("/api/route", response_model=RouteResponse)
-def create_route(req: RouteRequest):
-    result = run_workflow(req.query)
 
-    # langgraph>=0.6 devuelve dict; convertir a GraphState
-    if isinstance(result, dict):
-        try:
-            result = GraphState.model_validate(result)
-        except Exception:
-            # Como fallback, pasar el error si existe
-            err = result.get("error") if isinstance(result, dict) else None
-            raise HTTPException(status_code=400, detail=str(err or "Error interno"))
 
+@app.post(
+    "/api/route",
+    response_model=RouteResponse,
+    tags=["routes"],
+    responses={
+        422: {"model": ErrorResponse, "description": "The description could not be turned into a route"},
+        502: {"model": ErrorResponse, "description": "OpenAI or Google Maps failed"},
+        503: {"model": ErrorResponse, "description": "The server is missing API keys"},
+    },
+)
+def create_route(req: RouteRequest) -> RouteResponse:
+    missing = settings.missing_keys()
+    if missing:
+        raise HTTPException(status_code=503, detail=f"Server is not configured: missing {', '.join(missing)}.")
+
+    result = run_workflow(req.query, req.travel_mode)
     if result.error:
-        raise HTTPException(status_code=400, detail=result.error)
+        raise HTTPException(status_code=result.error_status, detail=result.error)
 
-    # Construir respuesta
-    steps: list[RouteStepResponse] = []
-    for s in result.route_steps:
-        steps.append(
-            RouteStepResponse(
-                **{
-                    "from": s.from_location,
-                    "to": s.to_location,
-                    "distance": format_distance(s.distance_km),
-                    "time": format_duration(s.duration_min),
-                }
-            )
-        )
-
-    resp = RouteResponse(
-        origin=result.origin or (result.optimized_locations[0] if result.optimized_locations else ""),
-        optimized_order=result.optimized_locations,
+    stops = [result.locations[i] for i in result.optimized_order]
+    return RouteResponse(
+        origin=result.origin or stops[0].name,
+        optimized_order=[s.name for s in stops],
+        stops=[StopResponse(**s.model_dump()) for s in stops],
+        return_to_origin=result.return_to_origin,
+        travel_mode=result.travel_mode,
         total_distance_km=result.total_distance_km,
         estimated_time_min=result.total_duration_min,
-        steps=steps,
+        steps=[
+            RouteStepResponse(
+                from_location=step.from_location,
+                to_location=step.to_location,
+                distance=format_distance(step.distance_km),
+                time=format_duration(step.duration_min),
+                distance_km=step.distance_km,
+                duration_min=step.duration_min,
+            )
+            for step in result.route_steps
+        ],
+        route_polyline=result.route_polyline,
         google_maps_url=result.google_maps_url,
     )
-    return resp
 
 
-@app.get("/api/info")
-def api_info():
-    """
-    Información de la API para clientes
-    """
-    return {
-        "name": settings.app_name,
-        "version": "1.0.0",
-        "endpoints": {
-            "health": "/health",
-            "calculate_route": "POST /api/route",
-            "docs": "/docs",
-            "openapi": "/openapi.json",
-        },
-        "description": "API para cálculo de rutas óptimas usando LangGraph y Google Maps",
-    }
-
-
-# Root info
-@app.get("/")
-def root():
-    """
-    Root endpoint - redirige a documentación
-    """
-    return {
-        "name": settings.app_name,
-        "message": "Agente de Rutas con IA - LangGraph + Google Maps",
-        "docs": "/docs",
-        "api_info": "/api/info",
-        "health": "/health",
-    }
+# The web UI lives at "/". Mounted last so it never shadows the API routes.
+if FRONTEND_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

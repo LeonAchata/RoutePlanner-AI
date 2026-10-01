@@ -1,88 +1,40 @@
-"""
-Nodo 5: Obtiene direcciones detalladas para cada tramo de la ruta
-"""
+"""Node 5: real per-leg distances, times and the polyline for the chosen order."""
+import logging
+
+from app.errors import RouteError
 from app.models.state import GraphState, RouteStep
 from app.services.google_maps import GoogleMapsService
 
+logger = logging.getLogger(__name__)
 
-def get_directions_node(state: GraphState) -> GraphState:
-    """
-    Obtiene direcciones paso a paso usando Google Directions API
-    para cada segmento de la ruta optimizada
-    """
-    
-    if not state.optimized_order:
-        state.error = "No hay ruta optimizada disponible"
-        return state
-    
-    google_service = GoogleMapsService()
-    route_steps: list[RouteStep] = []
-    
+
+def get_directions_node(state: GraphState) -> dict:
+    stops = [state.locations[i] for i in state.optimized_order]
+
+    route = None
     try:
-        # Iterar sobre cada par consecutivo en la ruta
-        for i in range(len(state.optimized_order) - 1):
-            from_idx = state.optimized_order[i]
-            to_idx = state.optimized_order[i + 1]
-            
-            from_location = state.locations[from_idx]
-            to_location = state.locations[to_idx]
-            
-            # Obtener direcciones para este tramo
-            directions = google_service.get_directions(
-                origin=(from_location.lat, from_location.lng),
-                destination=(to_location.lat, to_location.lng)
-            )
-            
-            if not directions:
-                # Si no hay direcciones, usar datos de la matriz
-                distance_km = state.distance_matrix[from_idx][to_idx]
-                duration_min = state.duration_matrix[from_idx][to_idx]
-                polyline = None
-            else:
-                # Extraer información de la primera ruta
-                leg = directions[0]['legs'][0]
-                distance_km = leg['distance']['value'] / 1000.0
-                duration_min = leg['duration']['value'] // 60
-                polyline = directions[0]['overview_polyline']['points']
-            
-            # Crear step
-            step = RouteStep(
-                from_location=from_location.name,
-                to_location=to_location.name,
+        route = GoogleMapsService().directions(stops, mode=state.travel_mode)
+    except RouteError as exc:
+        # Directions only adds detail; the matrix already has what we need.
+        logger.warning("Directions failed, using matrix values: %s", exc.message)
+
+    legs = route["legs"] if route else []
+    steps = []
+    for k, (a, b) in enumerate(zip(state.optimized_order, state.optimized_order[1:])):
+        if len(legs) == len(stops) - 1:
+            distance_km = legs[k]["distance"]["value"] / 1000.0
+            duration_min = legs[k]["duration"]["value"] / 60.0
+        else:
+            distance_km = state.distance_matrix[a][b]
+            duration_min = state.duration_matrix[a][b]
+        steps.append(
+            RouteStep(
+                from_location=state.locations[a].name,
+                to_location=state.locations[b].name,
                 distance_km=round(distance_km, 2),
-                duration_min=duration_min,
-                polyline=polyline
+                duration_min=round(duration_min),
             )
-            
-            route_steps.append(step)
-        
-        state.route_steps = route_steps
-        
-        state.messages.append({
-            "role": "system",
-            "content": f"✅ Direcciones obtenidas: {len(route_steps)} tramos"
-        })
-        
-    except Exception as e:
-        # Si falla Directions API, construir steps básicos desde la matriz
-        state.messages.append({
-            "role": "system",
-            "content": f"⚠️ Usando datos de matriz (Directions API falló): {str(e)}"
-        })
-        
-        for i in range(len(state.optimized_order) - 1):
-            from_idx = state.optimized_order[i]
-            to_idx = state.optimized_order[i + 1]
-            
-            step = RouteStep(
-                from_location=state.locations[from_idx].name,
-                to_location=state.locations[to_idx].name,
-                distance_km=round(state.distance_matrix[from_idx][to_idx], 2),
-                duration_min=state.duration_matrix[from_idx][to_idx],
-                polyline=None
-            )
-            route_steps.append(step)
-        
-        state.route_steps = route_steps
-    
-    return state
+        )
+
+    polyline = route.get("overview_polyline", {}).get("points") if route else None
+    return {"route_steps": steps, "route_polyline": polyline}

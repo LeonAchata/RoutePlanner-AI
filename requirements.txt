@@ -1,25 +1,8 @@
-# FastAPI y servidor
-fastapi
-uvicorn[standard]
-
-# Pydantic v2
-pydantic
-pydantic-settings
-
-# LangGraph y LangChain
-langgraph
-langchain
-langchain-openai
-langchain-core
-
-# OpenAI
-openai
-
-# Google Maps
-googlemaps
-
-# Optimización (OR-Tools para TSP)
-ortools
-
-# Utilidades
-python-dotenv
+fastapi>=0.115
+uvicorn[standard]>=0.30
+pydantic>=2.7
+pydantic-settings>=2.3
+langgraph>=0.2.50
+openai>=1.40
+googlemaps>=4.10
+ortools>=9.10

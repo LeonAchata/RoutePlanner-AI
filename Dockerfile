@@ -1,56 +1,26 @@
-FROM python:3.11-slim
+FROM python:3.12-slim
 
-# Metadata
-LABEL maintainer="tu-email@example.com"
-LABEL description="Agente Inteligente de Rutas con LangGraph y Google Maps"
-
-# Variables de entorno
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    PORT=8000
 
-# Directorio de trabajo
 WORKDIR /app
 
-# Instalar dependencias del sistema
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    gcc \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-# Copiar requirements
 COPY requirements.txt .
+RUN pip install -r requirements.txt
 
-# Instalar dependencias de Python
-RUN pip install --upgrade pip && \
-    pip install -r requirements.txt
+COPY app ./app
+COPY frontend ./frontend
 
-# Copiar código de la aplicación
-COPY ./app ./app
-# Copiar frontend como carpeta pública (compatibilidad con estructura actual)
-COPY ./frontend ./public
-# Copiar script de inicio
-COPY ./start.sh ./start.sh
-
-# Hacer ejecutable el script
-RUN chmod +x start.sh
-
-# Crear usuario no-root
-RUN useradd -m -u 1000 appuser && \
-    chown -R appuser:appuser /app
-
-# Cambiar a usuario no-root
+RUN useradd --create-home --uid 1000 appuser
 USER appuser
 
-# Exponer puerto (Railway usa PORT variable)
-EXPOSE 8001
-ENV PORT=8001
+EXPOSE 8000
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -fsS http://localhost:${PORT:-8000}/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD python -c "import os, urllib.request; urllib.request.urlopen(f'http://127.0.0.1:{os.environ.get(\"PORT\", \"8000\")}/health', timeout=4)"
 
-# Comando de inicio (Railway/producción usa start.sh con $PORT dinámico)
-CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8001}"]
+# PORT is read at runtime so platforms like Railway or Render can inject it.
+CMD ["sh", "-c", "uvicorn app.main:app --host 0.0.0.0 --port ${PORT} --proxy-headers"]

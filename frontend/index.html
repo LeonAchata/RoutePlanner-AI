@@ -1,99 +1,124 @@
 <!DOCTYPE html>
-<html lang="es">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Agente de Rutas Inteligente - LangGraph</title>
-    <meta name="description" content="Calcula rutas óptimas usando IA y Google Maps">
+    <title>RoutePlanner</title>
+    <meta name="description" content="Describe your stops in plain language and get the fastest order to visit them.">
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%231f6feb'/%3E%3Cpath d='M9 22c0-6 14-6 14-12' stroke='white' stroke-width='3' fill='none' stroke-linecap='round'/%3E%3Ccircle cx='9' cy='22' r='3' fill='white'/%3E%3Ccircle cx='23' cy='10' r='3' fill='white'/%3E%3C/svg%3E">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
-    <div class="container">
-        <header>
-            <h1>🗺️ Agente de Rutas Inteligente</h1>
-            <p class="subtitle">Describe tu ruta en lenguaje natural y te daremos la mejor secuencia</p>
-        </header>
-        
-        <!-- Input Form -->
-        <div class="card">
-            <form id="routeForm">
-                <div class="input-section">
-                    <label for="routeInput">Describe tu ruta o entregas:</label>
-                    <textarea 
-                        id="routeInput" 
-                        placeholder="Ejemplo: Hoy voy a hacer 3 entregas, una en calle Los Olivos 123, Barranco, otra en jiron Sucre 456, Magdalena y otra en Av. Larco 789, Miraflores"
+    <header class="topbar">
+        <a class="brand" href="./">
+            <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+                <rect width="32" height="32" rx="8"/>
+                <path d="M9 22c0-6 14-6 14-12"/>
+                <circle cx="9" cy="22" r="3"/>
+                <circle cx="23" cy="10" r="3"/>
+            </svg>
+            <span>RoutePlanner</span>
+        </a>
+        <nav class="topnav">
+            <a href="docs" target="_blank" rel="noopener">API docs</a>
+            <a href="https://github.com/LeonAchata/RoutePlanner-AI" target="_blank" rel="noopener">GitHub</a>
+        </nav>
+    </header>
+
+    <main class="layout">
+        <section class="panel" aria-label="Route planner">
+            <form id="routeForm" class="planner" novalidate>
+                <div class="field">
+                    <label for="routeInput">Where are you going today?</label>
+                    <textarea
+                        id="routeInput"
+                        rows="5"
+                        maxlength="1000"
+                        placeholder="Starting from Av. Arequipa 1200, Lince. Deliveries at Av. Larco 789 Miraflores, Jr. Sucre 456 Magdalena and Calle Los Olivos 123 Barranco."
                         required
                     ></textarea>
+                    <div class="field-meta">
+                        <span class="hint">Mention a starting point and the places to visit. Say "and back" for a round trip.</span>
+                        <span id="charCount" class="char-count">0 / 1000</span>
+                    </div>
                 </div>
-                
-                <!-- Examples -->
-                <div class="examples">
-                    <h4>Ejemplos:</h4>
-                    <ul id="examplesList"></ul>
-                </div>
-                
-                <button type="submit" id="submitBtn" class="btn-primary">
-                    🗺️ Calcular Ruta Óptima
+
+                <fieldset class="field">
+                    <legend>Travel mode</legend>
+                    <div class="segmented" role="radiogroup">
+                        <label><input type="radio" name="travelMode" value="driving" checked><span>Driving</span></label>
+                        <label><input type="radio" name="travelMode" value="walking"><span>Walking</span></label>
+                        <label><input type="radio" name="travelMode" value="bicycling"><span>Cycling</span></label>
+                    </div>
+                </fieldset>
+
+                <button type="submit" id="submitBtn" class="btn btn-primary">
+                    <span class="btn-label">Plan route</span>
+                    <kbd class="btn-kbd">Ctrl Enter</kbd>
                 </button>
+
+                <div class="examples">
+                    <span class="examples-title">Try an example</span>
+                    <div id="examplesList" class="chips"></div>
+                </div>
             </form>
-        </div>
-        
-        <!-- Loading State -->
-        <div id="loadingContainer" class="card loading-container hidden">
-            <div class="spinner"></div>
-            <p>Calculando ruta óptima con IA...</p>
-        </div>
-        
-        <!-- Error Alert -->
-        <div id="errorContainer" class="alert alert-error hidden">
-            <span class="alert-icon">⚠️</span>
-            <div>
-                <strong>Error:</strong> <span id="errorMessage"></span>
-            </div>
-        </div>
-        
-        <!-- Results -->
-        <div id="resultsContainer" class="card hidden">
-            <div class="results-header">
-                <h2>✅ Ruta Calculada</h2>
-                <div style="color: #64748b; font-size: 0.9rem;">
-                    Origen: <strong id="origin"></strong>
+
+            <div id="errorBox" class="alert hidden" role="alert">
+                <div class="alert-body">
+                    <strong>Could not plan this route</strong>
+                    <p id="errorMessage"></p>
                 </div>
-            </div>
-            
-            <!-- Stats -->
-            <div class="stats">
-                <div class="stat-card">
-                    <div class="stat-label">Distancia Total</div>
-                    <div class="stat-value"><span id="totalDistance"></span> km</div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">Tiempo Estimado</div>
-                    <div class="stat-value"><span id="totalTime"></span></div>
-                </div>
-                <div class="stat-card">
-                    <div class="stat-label">Destinos</div>
-                    <div class="stat-value"><span id="destinationsCount"></span></div>
-                </div>
-            </div>
-            
-            <!-- Route Order -->
-            <div class="route-path">
-                <h3>🛣️ Orden de Visita</h3>
-                <div class="location-list" id="locationList"></div>
-            </div>
-            
-            <!-- Detailed Steps -->
-            <div class="route-steps">
-                <h3>📍 Pasos Detallados</h3>
-                <div id="stepsList"></div>
+                <button type="button" class="alert-close" id="errorClose" aria-label="Dismiss">&times;</button>
             </div>
 
-            <!-- Google Maps Button -->
-            <div id="gmapsLink" style="margin-top: 1.5em;"></div>
-        </div>
-    </div>
-    
+            <section id="results" class="results hidden" aria-live="polite">
+                <div class="results-head">
+                    <h2>Optimized route</h2>
+                    <span id="tripType" class="badge"></span>
+                </div>
+
+                <dl class="stats">
+                    <div class="stat">
+                        <dt>Distance</dt>
+                        <dd id="totalDistance">-</dd>
+                    </div>
+                    <div class="stat">
+                        <dt>Travel time</dt>
+                        <dd id="totalTime">-</dd>
+                    </div>
+                    <div class="stat">
+                        <dt>Stops</dt>
+                        <dd id="stopCount">-</dd>
+                    </div>
+                </dl>
+
+                <ol id="itinerary" class="itinerary"></ol>
+
+                <div class="actions">
+                    <a id="gmapsLink" class="btn btn-primary" target="_blank" rel="noopener">Open in Google Maps</a>
+                    <button type="button" id="copyLink" class="btn btn-secondary">Copy link</button>
+                </div>
+                <p id="gmapsNote" class="note hidden">Google Maps links support up to 11 stops, so this route can only be followed here.</p>
+            </section>
+        </section>
+
+        <section class="map-wrap" aria-label="Map">
+            <div id="map"></div>
+            <div id="mapEmpty" class="map-empty">
+                <p>Your route will appear here.</p>
+            </div>
+            <div id="loading" class="map-loading hidden" aria-hidden="true">
+                <div class="spinner"></div>
+                <span>Planning your route</span>
+            </div>
+        </section>
+    </main>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
     <script src="app.js"></script>
 </body>
 </html>

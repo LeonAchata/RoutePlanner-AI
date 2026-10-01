@@ -1,86 +1,35 @@
-"""
-Nodo 6: Formatea la salida final (último nodo antes de END)
-"""
+"""Node 6: totals and a shareable Google Maps link."""
+from urllib.parse import urlencode
+
 from app.models.state import GraphState
 
+# Google Maps URLs accept at most 9 waypoints. Past that Google silently drops
+# stops, so it is better to return no link than a wrong one.
+MAX_URL_WAYPOINTS = 9
 
-def format_output_node(state: GraphState) -> GraphState:
-    """
-    Nodo final: valida y formatea la salida
-    Asegura que todos los datos necesarios estén presentes
-    """
-    
-    try:
-        # Validaciones finales
-        if not state.optimized_locations:
-            state.error = "No se generó ruta optimizada"
-            return state
-        
-        if not state.route_steps:
-            state.error = "No se generaron pasos de la ruta"
-            return state
-        
-        # Validar consistencia
-        expected_steps = len(state.optimized_locations) - 1
-        if len(state.route_steps) != expected_steps:
-            state.messages.append({
-                "role": "system",
-                "content": f"⚠️ Inconsistencia: {len(state.route_steps)} steps vs {expected_steps} esperados"
-            })
-        
-        # Recalcular totales por si acaso (redundancia)
-        recalculated_distance = sum(step.distance_km for step in state.route_steps)
-        recalculated_duration = sum(step.duration_min for step in state.route_steps)
-        
-        # Si hay diferencia significativa, actualizar
-        if abs(recalculated_distance - state.total_distance_km) > 0.5:
-            state.total_distance_km = round(recalculated_distance, 2)
-        
-        if abs(recalculated_duration - state.total_duration_min) > 2:
-            state.total_duration_min = recalculated_duration
-        
-        # Mensaje de éxito
-        state.messages.append({
-            "role": "system",
-            "content": f"✅ Ruta completada: {len(state.optimized_locations)} ubicaciones, "
-                      f"{state.total_distance_km} km, {state.total_duration_min} min"
-        })
-        
-        # Generar resumen legible
-        summary_parts = []
-        summary_parts.append(f"🗺️ Ruta óptima calculada:")
-        summary_parts.append(f"📍 Inicio: {state.origin}")
-        summary_parts.append(f"🎯 Destinos visitados: {len(state.destinations)}")
-        summary_parts.append(f"📏 Distancia total: {state.total_distance_km} km")
-        summary_parts.append(f"⏱️ Tiempo estimado: {state.total_duration_min} min ({state.total_duration_min // 60}h {state.total_duration_min % 60}min)")
-        summary_parts.append(f"\n🛣️ Orden de visita:")
-        
-        for i, location in enumerate(state.optimized_locations, 1):
-            summary_parts.append(f"  {i}. {location}")
-        
-        state.messages.append({
-            "role": "assistant",
-            "content": "\n".join(summary_parts)
-        })
-        
-        # Generar URL de Google Maps con paradas
-        import urllib.parse
-        
-        locs = state.optimized_locations
-        if locs and len(locs) > 1:
-            origin = urllib.parse.quote(locs[0])
-            destination = urllib.parse.quote(locs[-1])
-            waypoints = "|".join([urllib.parse.quote(loc) for loc in locs[1:-1]]) if len(locs) > 2 else ""
-            base = "https://www.google.com/maps/dir/?api=1"
-            url = f"{base}&origin={origin}&destination={destination}"
-            if waypoints:
-                url += f"&waypoints={waypoints}"
-            url += "&travelmode=driving"
-            state.google_maps_url = url
-        else:
-            state.google_maps_url = ""
-        
-    except Exception as e:
-        state.error = f"Error formateando salida: {str(e)}"
-    
-    return state
+
+def build_google_maps_url(points: list[str], travel_mode: str) -> str:
+    if len(points) < 2 or len(points) - 2 > MAX_URL_WAYPOINTS:
+        return ""
+    params = {
+        "api": "1",
+        "origin": points[0],
+        "destination": points[-1],
+        "travelmode": travel_mode,
+    }
+    waypoints = points[1:-1]
+    if waypoints:
+        params["waypoints"] = "|".join(waypoints)
+    return "https://www.google.com/maps/dir/?" + urlencode(params)
+
+
+def format_output_node(state: GraphState) -> dict:
+    stops = [state.locations[i] for i in state.optimized_order]
+    # Coordinates are unambiguous; place names like "Surco" are not.
+    points = [f"{s.lat},{s.lng}" for s in stops]
+
+    return {
+        "total_distance_km": round(sum(s.distance_km for s in state.route_steps), 2),
+        "total_duration_min": sum(s.duration_min for s in state.route_steps),
+        "google_maps_url": build_google_maps_url(points, state.travel_mode),
+    }

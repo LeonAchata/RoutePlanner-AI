@@ -1,219 +1,377 @@
-// Agente de Rutas - Lógica Principal
+'use strict';
 
-// Configuración de la API
-// Si se abre el HTML con file://, window.location.origin no es válido.
-// Usamos localhost por defecto y permitimos override con ?api=http://host:puerto
-const API_QUERY_OVERRIDE = new URLSearchParams(window.location.search).get('api');
-const DEFAULT_API_BASE = 'http://localhost:8001';
-const ORIGIN_IS_HTTP = window.location.protocol.startsWith('http');
-const API_BASE_URL = (API_QUERY_OVERRIDE && API_QUERY_OVERRIDE.trim())
-    || (ORIGIN_IS_HTTP ? window.location.origin : DEFAULT_API_BASE);
-const API_ROUTE_ENDPOINT = `${API_BASE_URL.replace(/\/$/, '')}/api/route`;
+// The UI is normally served by the API itself. When the file is opened
+// directly (file://) fall back to a local server, and allow ?api=... to point
+// at any other backend.
+const API_BASE = (() => {
+    const override = new URLSearchParams(window.location.search).get('api');
+    if (override && override.trim()) return override.trim().replace(/\/$/, '');
+    if (window.location.protocol.startsWith('http')) return '';
+    return 'http://localhost:8000';
+})();
 
-// Referencias DOM
-const elements = {
-    form: document.getElementById('routeForm'),
-    input: document.getElementById('routeInput'),
-    submitBtn: document.getElementById('submitBtn'),
-    loadingContainer: document.getElementById('loadingContainer'),
-    errorContainer: document.getElementById('errorContainer'),
-    errorMessage: document.getElementById('errorMessage'),
-    resultsContainer: document.getElementById('resultsContainer'),
-    originSpan: document.getElementById('origin'),
-    totalDistance: document.getElementById('totalDistance'),
-    totalTime: document.getElementById('totalTime'),
-    destinationsCount: document.getElementById('destinationsCount'),
-    locationList: document.getElementById('locationList'),
-    stepsList: document.getElementById('stepsList'),
-};
+const REQUEST_TIMEOUT_MS = 90_000;
+const MAX_QUERY_LENGTH = 1000;
 
-// Ejemplos de consultas
-const examples = [
-    "Estoy en Lima Centro, necesito ir a Miraflores, San Isidro y Barranco",
-    "Hoy voy a hacer 3 entregas, una en calle Los Olivos 123, Barranco, otra en jiron Sucre 456, Magdalena y otra en Av. Larco 789, Miraflores",
-    "Desde Callao, visitaré San Miguel, Pueblo Libre, Jesús María y volver a casa",
-    "Ruta desde Surco: La Molina, Ate, Santa Anita y San Borja",
+const EXAMPLES = [
+    {
+        label: 'Errands in Lima',
+        text: "I'm in Lima Centro and need to go to Miraflores, San Isidro and Barranco.",
+    },
+    {
+        label: 'Delivery run',
+        text: 'Leaving from Av. Arequipa 1200, Lince. Deliveries at Av. Larco 789 Miraflores, Jr. Sucre 456 Magdalena del Mar and Calle Los Olivos 123 Barranco.',
+    },
+    {
+        label: 'Round trip',
+        text: 'Desde el Callao voy a San Miguel, Pueblo Libre y Jesus Maria, y luego vuelvo a casa.',
+    },
+    {
+        label: 'Sales visits',
+        text: 'Starting at Jockey Plaza, visit clients in La Molina, San Borja and Surquillo.',
+    },
 ];
 
-// Inicialización
-document.addEventListener('DOMContentLoaded', () => {
-    setupEventListeners();
-    populateExamples();
-});
+const $ = (id) => document.getElementById(id);
 
-function setupEventListeners() {
-    elements.form.addEventListener('submit', handleSubmit);
+const ui = {
+    form: $('routeForm'),
+    input: $('routeInput'),
+    charCount: $('charCount'),
+    submitBtn: $('submitBtn'),
+    examples: $('examplesList'),
+    errorBox: $('errorBox'),
+    errorMessage: $('errorMessage'),
+    errorClose: $('errorClose'),
+    results: $('results'),
+    tripType: $('tripType'),
+    totalDistance: $('totalDistance'),
+    totalTime: $('totalTime'),
+    stopCount: $('stopCount'),
+    itinerary: $('itinerary'),
+    gmapsLink: $('gmapsLink'),
+    gmapsNote: $('gmapsNote'),
+    copyLink: $('copyLink'),
+    loading: $('loading'),
+    mapEmpty: $('mapEmpty'),
+};
+
+let inFlight = null;
+
+/* ---------- Map ---------- */
+
+const map = (() => {
+    if (typeof L === 'undefined') return null;
+
+    const instance = L.map('map', { zoomControl: true }).setView([-12.08, -77.04], 12);
+    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        className: 'base-tiles',
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    }).addTo(instance);
+
+    return { instance, layer: L.layerGroup().addTo(instance), markers: [] };
+})();
+
+function drawRoute(data) {
+    if (!map) return;
+    map.layer.clearLayers();
+    map.markers = [];
+
+    const routeColor = getComputedStyle(document.documentElement).getPropertyValue('--route').trim() || '#1f6feb';
+    const path = data.route_polyline
+        ? decodePolyline(data.route_polyline)
+        : data.stops.map((s) => [s.lat, s.lng]);
+
+    L.polyline(path, {
+        color: routeColor,
+        weight: 5,
+        opacity: 0.85,
+        // Straight dashed lines make it clear we only know the stop order,
+        // not the actual streets.
+        dashArray: data.route_polyline ? null : '6 8',
+    }).addTo(map.layer);
+
+    // On a round trip the last stop is the origin again; one marker is enough.
+    const stops = data.return_to_origin ? data.stops.slice(0, -1) : data.stops;
+    stops.forEach((stop, i) => {
+        const marker = L.marker([stop.lat, stop.lng], {
+            icon: L.divIcon({
+                className: '',
+                html: `<div class="map-pin${i === 0 ? ' is-origin' : ''}">${i === 0 ? 'A' : i}</div>`,
+                iconSize: [28, 28],
+                iconAnchor: [14, 14],
+            }),
+            title: stop.name,
+            zIndexOffset: i === 0 ? 1000 : 0,
+        });
+        marker.bindPopup(popupContent(stop));
+        marker.addTo(map.layer);
+        map.markers.push(marker);
+    });
+
+    map.instance.fitBounds(L.latLngBounds(path), { padding: [48, 48], maxZoom: 16 });
+    ui.mapEmpty.classList.add('hidden');
 }
 
-function populateExamples() {
-    const examplesList = document.getElementById('examplesList');
-    examplesList.innerHTML = examples
-        .map(example => `<li onclick="fillExample('${example.replace(/'/g, "\\'")}')">${example}</li>`)
-        .join('');
+function popupContent(stop) {
+    const root = document.createElement('div');
+    const name = document.createElement('strong');
+    name.textContent = stop.name;
+    root.appendChild(name);
+    if (stop.address && stop.address !== stop.name) {
+        const addr = document.createElement('div');
+        addr.textContent = stop.address;
+        root.appendChild(addr);
+    }
+    return root;
 }
 
-function fillExample(text) {
-    elements.input.value = text;
-    elements.input.focus();
+// Google's encoded polyline format:
+// https://developers.google.com/maps/documentation/utilities/polylinealgorithm
+function decodePolyline(encoded) {
+    const points = [];
+    let index = 0;
+    let lat = 0;
+    let lng = 0;
+
+    const next = () => {
+        let result = 0;
+        let shift = 0;
+        let byte;
+        do {
+            byte = encoded.charCodeAt(index++) - 63;
+            result |= (byte & 0x1f) << shift;
+            shift += 5;
+        } while (byte >= 0x20);
+        return result & 1 ? ~(result >> 1) : result >> 1;
+    };
+
+    while (index < encoded.length) {
+        lat += next();
+        lng += next();
+        points.push([lat / 1e5, lng / 1e5]);
+    }
+    return points;
 }
 
-async function handleSubmit(e) {
-    e.preventDefault();
+/* ---------- Form ---------- */
 
-    const query = elements.input.value.trim();
-    if (!query) {
-        showError('Por favor, ingresa una descripción de la ruta');
+function renderExamples() {
+    for (const example of EXAMPLES) {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'chip';
+        chip.textContent = example.label;
+        chip.title = example.text;
+        chip.addEventListener('click', () => {
+            ui.input.value = example.text;
+            updateCharCount();
+            ui.input.focus();
+        });
+        ui.examples.appendChild(chip);
+    }
+}
+
+function updateCharCount() {
+    ui.charCount.textContent = `${ui.input.value.length} / ${MAX_QUERY_LENGTH}`;
+}
+
+function selectedMode() {
+    return ui.form.querySelector('input[name="travelMode"]:checked').value;
+}
+
+async function handleSubmit(event) {
+    event.preventDefault();
+    const query = ui.input.value.trim();
+
+    if (query.length < 3) {
+        showError('Describe where you start and which places you want to visit.');
+        ui.input.focus();
         return;
     }
 
-    // Reset UI
+    if (inFlight) inFlight.abort();
+    const controller = new AbortController();
+    inFlight = controller;
+    const timeout = setTimeout(() => controller.abort('timeout'), REQUEST_TIMEOUT_MS);
+
     hideError();
-    hideResults();
-    showLoading();
-    setButtonLoading(true);
+    setLoading(true);
 
     try {
-        const response = await fetch(API_ROUTE_ENDPOINT, {
+        const response = await fetch(`${API_BASE}/api/route`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-            },
-            body: JSON.stringify({ query }),
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query, travel_mode: selectedMode() }),
+            signal: controller.signal,
         });
 
-        const data = await response.json();
+        const data = await response.json().catch(() => null);
+        if (!response.ok) throw new Error(errorText(response.status, data));
 
-        if (!response.ok) {
-            throw new Error(data.detail || 'Error al calcular la ruta');
-        }
-
-        displayResults(data);
+        renderResults(data);
     } catch (error) {
-        console.error('Error:', error);
-        showError(error.message || 'No se pudo conectar con el servidor');
+        if (controller.signal.aborted && controller.signal.reason !== 'timeout') return;
+        if (controller.signal.reason === 'timeout') {
+            showError('The server took too long to answer. Try again with fewer stops.');
+        } else if (error instanceof TypeError) {
+            showError('Could not reach the server. Make sure the API is running.');
+        } else {
+            showError(error.message);
+        }
     } finally {
-        hideLoading();
-        setButtonLoading(false);
+        clearTimeout(timeout);
+        if (inFlight === controller) {
+            inFlight = null;
+            setLoading(false);
+        }
     }
 }
 
-function showLoading() {
-    elements.loadingContainer.classList.remove('hidden');
+function errorText(status, data) {
+    const detail = data && data.detail;
+    if (typeof detail === 'string') return detail;
+    // FastAPI validation errors come back as a list.
+    if (Array.isArray(detail) && detail.length) return detail[0].msg || 'Invalid request.';
+    if (status >= 500) return 'The server ran into a problem. Try again in a moment.';
+    return 'The request could not be processed.';
 }
 
-function hideLoading() {
-    elements.loadingContainer.classList.add('hidden');
+function setLoading(isLoading) {
+    ui.submitBtn.disabled = isLoading;
+    ui.submitBtn.querySelector('.btn-label').textContent = isLoading ? 'Planning...' : 'Plan route';
+    ui.loading.classList.toggle('hidden', !isLoading);
+    ui.form.setAttribute('aria-busy', String(isLoading));
 }
 
 function showError(message) {
-    elements.errorMessage.textContent = message;
-    elements.errorContainer.classList.remove('hidden');
-    
-        if (data.google_maps_url) {
-            resultDiv.innerHTML += `<p><a href="${data.google_maps_url}" target="_blank" rel="noopener" class="gmaps-link">Ver ruta en Google Maps 🚗</a></p>`;
-        }
-    setTimeout(() => {
-        hideError();
-    }, 8000);
+    ui.errorMessage.textContent = message;
+    ui.errorBox.classList.remove('hidden');
 }
 
 function hideError() {
-    elements.errorContainer.classList.add('hidden');
+    ui.errorBox.classList.add('hidden');
 }
 
-function showResults() {
-    elements.resultsContainer.classList.remove('hidden');
-}
+/* ---------- Results ---------- */
 
-function hideResults() {
-    elements.resultsContainer.classList.add('hidden');
-}
+function renderResults(data) {
+    const destinations = data.stops.length - (data.return_to_origin ? 2 : 1);
 
-function setButtonLoading(isLoading) {
-    elements.submitBtn.disabled = isLoading;
-    if (isLoading) {
-        elements.submitBtn.classList.add('loading');
-        elements.submitBtn.textContent = 'Calculando...';
+    ui.tripType.textContent = data.return_to_origin ? 'Round trip' : 'One way';
+    ui.totalDistance.textContent = formatDistance(data.total_distance_km);
+    ui.totalTime.textContent = formatMinutes(data.estimated_time_min);
+    ui.stopCount.textContent = String(destinations);
+
+    ui.itinerary.replaceChildren(
+        ...data.stops.map((stop, i) => {
+            const isOrigin = i === 0 || (data.return_to_origin && i === data.stops.length - 1);
+            return stopItem(stop, i, isOrigin, data.steps[i]);
+        }),
+    );
+
+    if (data.google_maps_url) {
+        ui.gmapsLink.href = data.google_maps_url;
+        ui.gmapsLink.removeAttribute('aria-disabled');
+        ui.copyLink.disabled = false;
+        ui.gmapsNote.classList.add('hidden');
     } else {
-        elements.submitBtn.classList.remove('loading');
-        elements.submitBtn.innerHTML = '🗺️ Calcular Ruta Óptima';
+        ui.gmapsLink.removeAttribute('href');
+        ui.gmapsLink.setAttribute('aria-disabled', 'true');
+        ui.copyLink.disabled = true;
+        ui.gmapsNote.classList.remove('hidden');
+    }
+
+    ui.results.classList.remove('hidden');
+    drawRoute(data);
+
+    if (window.matchMedia('(max-width: 860px)').matches) {
+        ui.results.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
 }
 
-function displayResults(data) {
-    // Header
-    elements.originSpan.textContent = data.origin;
+function stopItem(stop, index, isOrigin, legAfter) {
+    const li = document.createElement('li');
+    li.className = 'stop';
 
-    // Stats
-    elements.totalDistance.textContent = data.total_distance_km.toFixed(1);
-    elements.totalTime.textContent = formatMinutes(data.estimated_time_min);
-    elements.destinationsCount.textContent = data.optimized_order.length - 1;
+    const marker = document.createElement('button');
+    marker.type = 'button';
+    marker.className = `stop-marker${isOrigin ? ' is-origin' : ''}`;
+    marker.textContent = isOrigin ? 'A' : String(index);
+    marker.setAttribute('aria-label', `Show ${stop.name} on the map`);
+    marker.addEventListener('click', () => focusStop(stop, isOrigin ? 0 : index));
 
-    // Locations
-    elements.locationList.innerHTML = data.optimized_order
-        .map((location, index) => `
-            <div class="location-item">
-                <div class="location-number">${index + 1}</div>
-                <div class="location-name">${location}</div>
-            </div>
-        `)
-        .join('');
+    const body = document.createElement('div');
+    const name = document.createElement('div');
+    name.className = 'stop-name';
+    name.textContent = stop.name;
+    body.appendChild(name);
 
-    // Steps
-    elements.stepsList.innerHTML = data.steps
-        .map((step, index) => `
-            <div class="step">
-                <div class="step-icon">🚗</div>
-                <div class="step-content">
-                    <div class="step-title">
-                        ${step.from} → ${step.to}
-                    </div>
-                    <div class="step-details">
-                        <div class="step-detail">
-                            <span>📏</span>
-                            <span>${step.distance}</span>
-                        </div>
-                        <div class="step-detail">
-                            <span>⏱️</span>
-                            <span>${step.time}</span>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        `)
-        .join('');
-
-    showResults();
-    
-    // Mostrar botón/enlace a Google Maps en el div dedicado
-    const gmapsDiv = document.getElementById('gmapsLink');
-    if (gmapsDiv) {
-        gmapsDiv.innerHTML = '';
-        if (data.google_maps_url) {
-            gmapsDiv.innerHTML = `<a href="${data.google_maps_url}" target="_blank" rel="noopener" class="btn-primary" style="display:inline-block;margin-top:20px;text-decoration:none;text-align:center;">🗺️ Ver ruta en Google Maps</a>`;
-        }
+    if (stop.address && stop.address.toLowerCase() !== stop.name.toLowerCase()) {
+        const address = document.createElement('div');
+        address.className = 'stop-address';
+        address.textContent = stop.address;
+        body.appendChild(address);
     }
-    
-    // Scroll suave a resultados
+
+    li.append(marker, body);
+
+    if (legAfter) {
+        const leg = document.createElement('div');
+        leg.className = 'leg';
+        leg.textContent = `${legAfter.distance}  ·  ${legAfter.time}`;
+        li.appendChild(leg);
+    }
+    return li;
+}
+
+function focusStop(stop, markerIndex) {
+    if (!map) return;
+    map.instance.flyTo([stop.lat, stop.lng], Math.max(map.instance.getZoom(), 15), { duration: 0.6 });
+    const marker = map.markers[markerIndex];
+    if (marker) marker.openPopup();
+}
+
+async function copyGoogleMapsLink() {
+    const url = ui.gmapsLink.href;
+    if (!url) return;
+    const label = ui.copyLink.textContent;
+    try {
+        await navigator.clipboard.writeText(url);
+        ui.copyLink.textContent = 'Copied';
+    } catch {
+        ui.copyLink.textContent = 'Copy failed';
+    }
     setTimeout(() => {
-        elements.resultsContainer.scrollIntoView({ 
-            behavior: 'smooth', 
-            block: 'start' 
-        });
-    }, 100);
+        ui.copyLink.textContent = label;
+    }, 1600);
 }
 
 function formatMinutes(minutes) {
-    if (minutes < 60) {
-        return `${minutes} min`;
-    }
+    if (minutes < 60) return `${minutes} min`;
     const hours = Math.floor(minutes / 60);
     const mins = minutes % 60;
-    return mins === 0 ? `${hours}h` : `${hours}h ${mins}min`;
+    return mins === 0 ? `${hours} h` : `${hours} h ${mins} min`;
 }
 
-// Manejo de errores globales
-window.addEventListener('unhandledrejection', (event) => {
-    console.error('Unhandled promise rejection:', event.reason);
-    showError('Ocurrió un error inesperado. Por favor, intenta nuevamente.');
+function formatDistance(km) {
+    return km < 1 ? `${Math.round(km * 1000)} m` : `${km.toFixed(1)} km`;
+}
+
+/* ---------- Wiring ---------- */
+
+ui.form.addEventListener('submit', handleSubmit);
+ui.input.addEventListener('input', updateCharCount);
+ui.input.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+        ui.form.requestSubmit();
+    }
 });
+ui.errorClose.addEventListener('click', hideError);
+ui.copyLink.addEventListener('click', copyGoogleMapsLink);
+
+document.querySelector('.topnav a[href="docs"]').href = `${API_BASE}/docs`;
+
+renderExamples();
+updateCharCount();

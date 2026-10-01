@@ -1,131 +1,92 @@
-"""
-Servicio para interactuar con LLMs (OpenAI)
-"""
-from openai import OpenAI
-from app.config import get_settings
+"""Turns a free-form trip description into origin + destinations using an LLM."""
 import json
-from typing import Dict, Any, Optional
+import logging
+from functools import lru_cache
+from typing import Optional
+
+import openai
+from openai import OpenAI
+from pydantic import BaseModel, Field, ValidationError, field_validator
+
+from app.config import get_settings
+from app.errors import RouteError, UpstreamError
+
+logger = logging.getLogger(__name__)
+
+SYSTEM_PROMPT = """You extract trip plans from short messages. The message can be in any language (usually Spanish).
+
+Return a JSON object with exactly these keys:
+- "origin": string or null. Where the trip starts.
+- "destinations": array of strings. Every place the person wants to visit, in the order mentioned.
+- "return_to_origin": boolean. True only if they say they come back to the start (for example "volver", "regresar", "back home", "return to the office").
+
+Rules:
+- Copy each place exactly as written, keeping street numbers, district and city ("Av. Larco 789, Miraflores"). Fix obvious typos only.
+- If a place has a street address and a district mentioned separately, join them into one string.
+- Never invent places and never add a country.
+- If no explicit starting point is given, use the first place mentioned as the origin.
+- Do not repeat the origin inside "destinations", even when they return to it.
+- If the message is not about visiting places, return {"origin": null, "destinations": [], "return_to_origin": false}."""
+
+
+class ParsedRoute(BaseModel):
+    origin: Optional[str] = None
+    destinations: list[str] = Field(default_factory=list)
+    return_to_origin: bool = False
+
+    @field_validator("destinations", mode="before")
+    @classmethod
+    def _drop_non_strings(cls, value):
+        if not isinstance(value, list):
+            return []
+        return [v for v in value if isinstance(v, str) and v.strip()]
+
+    @field_validator("origin", mode="before")
+    @classmethod
+    def _blank_origin_to_none(cls, value):
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return value
+
+
+@lru_cache
+def _client() -> OpenAI:
+    settings = get_settings()
+    return OpenAI(
+        api_key=settings.openai_api_key,
+        timeout=settings.llm_timeout_seconds,
+        max_retries=2,
+    )
 
 
 class LLMService:
-    """Cliente para llamadas a modelos de lenguaje"""
-    
-    def __init__(self):
+    def __init__(self, client: Optional[OpenAI] = None):
         self.settings = get_settings()
-        self.client = OpenAI(api_key=self.settings.openai_api_key)
-    
-    def parse_route_input(self, user_input: str) -> Dict[str, Any]:
-        """
-        Extrae información estructurada de un texto en lenguaje natural
-        sobre una ruta deseada
-        
-        Args:
-            user_input: Texto del usuario describiendo la ruta
-            
-        Returns:
-            Dict con origin, destinations y return_to_origin
-            
-        Ejemplo:
-            Input: "Estoy en Lima, quiero ir a Miraflores, Barranco y Surco"
-            Output: {
-                "origin": "Lima",
-                "destinations": ["Miraflores", "Barranco", "Surco"],
-                "return_to_origin": false
-            }
-        """
-        
-        system_prompt = """Eres un asistente especializado en extraer información de rutas.
+        self.client = client or _client()
 
-Tu tarea es analizar texto en lenguaje natural y extraer:
-1. origin: El punto de partida (string)
-2. destinations: Lista de lugares a visitar (array de strings)
-3. return_to_origin: Si menciona volver al punto inicial (boolean)
-
-Reglas importantes:
-- Respeta los nombres exactos de los lugares mencionados
-- No inventes ubicaciones que no estén en el texto
-- Si no hay origen explícito, usa el primer lugar mencionado
-- Si dice "volver", "regresar", "retornar a casa/inicio", entonces return_to_origin es true
-- Si no menciona volver, return_to_origin es false
-- Devuelve SOLO JSON válido, sin explicaciones adicionales"""
-
-        user_prompt = f"""Analiza este texto y extrae la información de ruta:
-
-"{user_input}"
-
-Responde con un JSON válido."""
-        
+    def parse_route_input(self, user_input: str) -> ParsedRoute:
         try:
             response = self.client.chat.completions.create(
                 model=self.settings.llm_model,
                 temperature=self.settings.llm_temperature,
+                response_format={"type": "json_object"},
                 messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": f"<message>\n{user_input}\n</message>"},
                 ],
-                response_format={"type": "json_object"}
             )
-            
-            content = response.choices[0].message.content
-            parsed_data = json.loads(content)
-            
-            # Validación básica
-            if "origin" not in parsed_data:
-                raise ValueError("No se pudo identificar el origen")
-            
-            if "destinations" not in parsed_data or not isinstance(parsed_data["destinations"], list):
-                raise ValueError("No se pudieron identificar los destinos")
-            
-            # Asegurar que return_to_origin sea boolean
-            parsed_data["return_to_origin"] = bool(parsed_data.get("return_to_origin", False))
-            
-            return parsed_data
-            
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Error parseando respuesta del LLM: {str(e)}")
-        except Exception as e:
-            raise ValueError(f"Error llamando al LLM: {str(e)}")
-    
-    def suggest_optimization(
-        self, 
-        current_route: list[str], 
-        context: Optional[str] = None
-    ) -> str:
-        """
-        Sugiere mejoras u observaciones sobre una ruta calculada
-        
-        Args:
-            current_route: Ruta actual ordenada
-            context: Contexto adicional (distancias, tiempos, etc.)
-            
-        Returns:
-            Sugerencia en texto natural
-        """
-        
-        prompt = f"""Analiza esta ruta y sugiere observaciones útiles:
+        except openai.AuthenticationError as exc:
+            logger.error("OpenAI rejected the API key: %s", exc)
+            raise UpstreamError("The language model rejected the configured API key.") from exc
+        except openai.RateLimitError as exc:
+            raise UpstreamError("The language model is rate limited. Try again in a minute.") from exc
+        except openai.OpenAIError as exc:
+            logger.exception("OpenAI request failed")
+            raise UpstreamError("Could not reach the language model.") from exc
 
-Ruta: {' → '.join(current_route)}
-{f'Contexto: {context}' if context else ''}
-
-Proporciona 2-3 observaciones breves y útiles sobre:
-- Posibles optimizaciones
-- Consideraciones de tiempo (hora pico, etc.)
-- Alternativas de transporte si aplica
-
-Sé conciso y práctico."""
-
+        content = response.choices[0].message.content or "{}"
         try:
-            response = self.client.chat.completions.create(
-                model=self.settings.llm_model,
-                temperature=0.7,
-                messages=[
-                    {"role": "system", "content": "Eres un asistente de planificación de rutas."},
-                    {"role": "user", "content": prompt}
-                ],
-                max_tokens=300
-            )
-            
-            return response.choices[0].message.content.strip()
-            
-        except Exception as e:
-            return f"No se pudieron generar sugerencias: {str(e)}"
+            return ParsedRoute.model_validate(json.loads(content))
+        except (json.JSONDecodeError, ValidationError) as exc:
+            logger.warning("Unparseable LLM output: %r", content)
+            raise RouteError("Could not understand the trip description. Try listing the places more explicitly.") from exc

@@ -1,5 +1,3 @@
-# app/__init__.py
-"""
-Agente Inteligente de Rutas
-"""
-__version__ = "1.0.0"
+"""RoutePlanner AI: natural language multi-stop route optimization."""
+
+__version__ = "1.1.0"
