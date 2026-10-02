@@ -179,3 +179,7 @@ tests/
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+## Author
+
+- Leon Achata
